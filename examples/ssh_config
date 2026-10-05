@@ -1,0 +1,31 @@
+# An ssh config with five things wrong with it, none of which ssh mentions.
+# Run:  firstmatch check -F examples/ssh_config
+
+# Defaults I want everywhere -- but putting them first means they win
+# everywhere, including over the specific blocks below.
+Host *
+    User deploy
+    ServerAliveInterval 30
+    IdentityFile ~/.ssh/id_ed25519
+
+Host github.com
+    User git
+    IdentityFile ~/.ssh/id_github
+
+Host bastion.example.com
+    User admin
+    Port 2222
+
+# Commas do not separate Host patterns. This block matches no host.
+Host db1,db2,db3
+    ProxyJump bastion.example.com
+
+# Reads like "everything except the old box". Matches nothing at all.
+Host !legacy.example.com
+    StrictHostKeyChecking no
+
+# Looks like it has the last word. It has the last word and therefore loses.
+Match final host github.com
+    User someoneelse
+
+Include ~/.ssh/config.d/*.conf
