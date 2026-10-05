@@ -32,6 +32,10 @@ from .parse import Block, Directive, ParseResult
 
 WILDCARD_CHARS = "*?"
 
+# A hostname no sane config names explicitly, used to represent "some host you
+# did not list". Needed so a catch-all block can be seen winning something.
+CATCHALL_PROBE = "firstmatch-any-host"
+
 
 @dataclass
 class Assignment:
@@ -263,10 +267,15 @@ def probe_hosts(parsed: ParseResult, limit: int = 40) -> list[str]:
                     for p in arg.split(","):
                         consider(p)
 
+    # Always probe a name that matches nothing specific. Without it, a trailing
+    # `Host *` block looks dead: it loses to every named host in the file, and
+    # the one host it wins for -- anything not named -- would never be tested.
+    # Flagging that block would be flagging the correct idiom.
     hosts = literals + synthetic
-    if not hosts:
-        hosts = ["firstmatch-any-host"]
-    return hosts[:limit]
+    hosts = hosts[: max(limit - 1, 1)]
+    if CATCHALL_PROBE not in hosts:
+        hosts.append(CATCHALL_PROBE)
+    return hosts
 
 
 def _shadow_advice(a: Assignment, w: Directive) -> str:
@@ -314,12 +323,24 @@ def check(
     hosts = hosts or probe_hosts(parsed)
     resolutions = [resolve(parsed, h, config, oracle) for h in hosts]
 
-    # Group the shadowed lines by the losing line, so a keyword dead for twelve
-    # hosts is one finding naming twelve hosts rather than twelve findings.
+    # A line is only dead if it never wins. `Host *` at the bottom of the file
+    # loses to every named host above it and wins for everything else, which is
+    # the recommended layout -- so a line that is live for any probed host is
+    # not reported at all.
+    ever_live: set[tuple[str, int, str]] = set()
+    for r in resolutions:
+        for a in r.assignments:
+            if a.state in ("live", "accumulated"):
+                ever_live.add((str(a.directive.file), a.directive.lineno, a.directive.key))
+
+    # Group the remainder by the losing line, so a keyword dead for twelve hosts
+    # is one finding naming twelve hosts rather than twelve findings.
     grouped: dict[tuple[str, int, str], dict] = {}
     for r in resolutions:
         for a in r.shadowed():
             k = (str(a.directive.file), a.directive.lineno, a.directive.key)
+            if k in ever_live:
+                continue
             e = grouped.setdefault(k, {"a": a, "hosts": [], "always": False})
             e["hosts"].append(r.host)
             if a.winner_block is not None and _always_shadows(a.winner_block):
@@ -436,7 +457,10 @@ def _comparable(key: str, written: str) -> str | None:
         return "<true>"
     if low in _BOOL_FALSE:
         return "<false>"
-    return v
+    # Our parse removes the quotes around an argument; ssh -G echoes them back
+    # as written. `"/bin/cmd with space" -x` and `/bin/cmd with space -x` are
+    # the same command, so quotes come off both sides before comparing.
+    return v.replace('"', "")
 
 
 def self_check(res: Resolution, config: Path, oracle: Oracle) -> SelfCheck:
