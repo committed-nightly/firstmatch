@@ -1,0 +1,91 @@
+name: CI
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The whole suite is skipped without ssh, so assert it is here rather
+      # than let 200 skipped tests report as a green run.
+      - name: ssh is present
+        run: ssh -V
+
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install ruff
+      - run: ruff check .
+
+  dogfood:
+    # The README quotes this output. If the tool stops producing it, the README
+    # is wrong, and a README that no longer describes the tool is the thing this
+    # job exists to catch.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e .
+
+      - name: findings on the example config are the documented six
+        run: |
+          set -o pipefail
+          firstmatch check -F examples/ssh_config -q | tee findings.txt && rc=0 || rc=$?
+          test "$rc" = 1 || { echo "expected exit 1, got $rc"; exit 1; }
+          for code in shadowed final-loses never-matches comma-in-host include-missing; do
+            grep -q ": $code: " findings.txt || { echo "missing $code"; exit 1; }
+          done
+          test "$(wc -l < findings.txt)" = 6 || {
+            echo "expected 6 findings, got $(wc -l < findings.txt)"; exit 1; }
+
+      - name: a clean config exits 0
+        run: |
+          printf 'Host github.com\n    User git\nHost *\n    User deploy\n' > clean.config
+          firstmatch check -F clean.config
+
+      - name: explain agrees with ssh -G on every value
+        run: |
+          firstmatch explain github.com -F examples/ssh_config
+          ssh -F examples/ssh_config -G github.com > /dev/null
+          # explain exits 3 only if our attribution disagrees with ssh -G.
+          firstmatch explain github.com -F examples/ssh_config > /dev/null
+
+      - name: a Match exec config is refused without consent
+        run: |
+          printf 'Match exec "touch %s/canary"\n    User e\nHost *\n    User p\n' "$PWD" > exec.config
+          firstmatch check -F exec.config && rc=0 || rc=$?
+          test "$rc" = 2 || { echo "expected exit 2, got $rc"; exit 1; }
+          test ! -e canary || { echo "ssh -G ran the Match exec command anyway"; exit 1; }
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
